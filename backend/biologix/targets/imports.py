@@ -33,9 +33,22 @@ import httpx
 
 from biologix.errors import ValidationFailure
 from biologix.settings import Settings, get_settings
-from biologix.targets.models import _AA_ALPHABET, Biologic, BiologicClass, Chain
+from biologix.targets.models import (
+    _AA_ALPHABET,
+    Biologic,
+    BiologicClass,
+    Chain,
+    Modification,
+    ModificationKind,
+)
 
 UNIPROT_FASTA = "https://rest.uniprot.org/uniprotkb/{accession}.fasta"
+# Only the fields that are actually read, so the response stays small and the
+# request says plainly what it is for.
+UNIPROT_FEATURES = (
+    "https://rest.uniprot.org/uniprotkb/{accession}.json"
+    "?fields=ft_chain,ft_peptide,ft_signal,ft_propep,ft_disulfid"
+)
 
 # ESM-2 emits at most 1022 residue embeddings; longer chains are refused by the
 # adapter rather than truncated, so a long chain is worth flagging at import.
@@ -65,6 +78,10 @@ class ImportedTarget:
     uniprot_id: str | None = None
     notes: str | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Modifications the *source* stated, never ones this module worked out.
+    #: A disulfide here came from a UniProt annotation and carries that
+    #: provenance; the distinction is the whole reason it is allowed through.
+    modifications: list[Modification] = field(default_factory=list)
 
     @property
     def total_residues(self) -> int:
@@ -90,6 +107,8 @@ class ImportedTarget:
             "uniprot_id": self.uniprot_id,
             "notes": self.notes,
             "warnings": self.warnings,
+            "modifications": [m.model_dump(mode="json") for m in self.modifications],
+            "modification_summary": [m.describe() for m in self.modifications],
         }
 
 
@@ -287,14 +306,159 @@ def from_pdb(pdb_id: str, *, name: str | None = None) -> ImportedTarget:
     )
 
 
-def from_uniprot(
-    accession: str, *, name: str | None = None, settings: Settings | None = None
-) -> ImportedTarget:
-    """Fetch the canonical sequence for a UniProt accession.
+def _chain_id_for(description: str, index: int, used: set[str]) -> str:
+    """A chain id from UniProt's own description of the chain.
 
-    One chain: UniProt describes a polypeptide, not an assembly. A multi-chain
-    biologic is imported either from its PDB entry or by pasting each chain,
-    and this route says so rather than pretending a mAb is one sequence.
+    ``Insulin A chain`` becomes ``A``, which matters: numbering the mature
+    chains in sequence order would call the B chain "A", because the B chain
+    comes first in the precursor. Every downstream disulfide and every
+    published reference to "A6-A11" would then point at the wrong chain.
+    """
+    match = re.search(r"\b([A-Z])\s+chain\b", description or "")
+    if match and match.group(1) not in used:
+        return match.group(1)
+    match = re.search(r"\bchain\s+([A-Z])\b", description or "", re.IGNORECASE)
+    if match and match.group(1).upper() not in used:
+        return match.group(1).upper()
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if letter not in used:
+            return letter
+    return f"C{index + 1}"
+
+
+def _mature_chains_from_features(
+    sequence: str, features: list[dict[str, Any]]
+) -> tuple[list[Chain], list[tuple[int, int, str]], list[str]]:
+    """Mature chains from UniProt's Chain and Peptide annotations.
+
+    Returns the chains, the precursor span each one occupies (so disulfides in
+    precursor numbering can be mapped onto them), and any warnings.
+
+    A UniProt entry is the *precursor*: for insulin that is 110 residues of
+    preproinsulin, which is a different molecule from the 51-residue hormone
+    and would give a different pI, a different charge and different chemistry.
+    The signal peptide and the C peptide are cleaved during maturation and are
+    not present in the drug.
+    """
+    spans: list[tuple[int, int, str]] = []
+    for feature in features:
+        if feature.get("type") not in ("Chain", "Peptide"):
+            continue
+        location = feature.get("location") or {}
+        start = (location.get("start") or {}).get("value")
+        end = (location.get("end") or {}).get("value")
+        if not isinstance(start, int) or not isinstance(end, int):
+            # An unknown boundary cannot be trimmed on safely.
+            continue
+        if start < 1 or end > len(sequence) or start > end:
+            continue
+        spans.append((start, end, str(feature.get("description") or "")))
+
+    spans.sort()
+    chains: list[Chain] = []
+    used: set[str] = set()
+    warnings: list[str] = []
+    for index, (start, end, description) in enumerate(spans):
+        chain_id = _chain_id_for(description, index, used)
+        used.add(chain_id)
+        chains.append(
+            Chain(
+                chain_id=chain_id,
+                sequence=sequence[start - 1 : end],
+                description=(
+                    f"{description or 'mature chain'}, residues {start}-{end} of the precursor"
+                ),
+            )
+        )
+
+    trimmed = [
+        f"{feature.get('type', '').lower()} "
+        f"{(feature.get('location') or {}).get('start', {}).get('value')}-"
+        f"{(feature.get('location') or {}).get('end', {}).get('value')}"
+        for feature in features
+        if feature.get("type") in ("Signal", "Propeptide", "Transit peptide")
+    ]
+    if chains and trimmed:
+        warnings.append(
+            "the precursor was trimmed to its mature chain(s) using UniProt's own "
+            f"annotation; removed: {', '.join(trimmed)}"
+        )
+    return chains, spans, warnings
+
+
+def _disulfides_from_features(
+    features: list[dict[str, Any]], spans: list[tuple[int, int, str]], chains: list[Chain]
+) -> tuple[list[Modification], list[str]]:
+    """Disulfides UniProt states, renumbered onto the mature chains.
+
+    Nothing is inferred. A cysteine pair appears here only because the entry
+    annotates it, and a bond whose partner was cleaved away during maturation
+    is dropped with a warning rather than being bent to fit.
+    """
+
+    def locate(position: int) -> tuple[str, int] | None:
+        for (start, end, _), chain in zip(spans, chains, strict=True):
+            if start <= position <= end:
+                return chain.chain_id, position - start + 1
+        return None
+
+    modifications: list[Modification] = []
+    warnings: list[str] = []
+    for feature in features:
+        if feature.get("type") != "Disulfide bond":
+            continue
+        location = feature.get("location") or {}
+        first = (location.get("start") or {}).get("value")
+        second = (location.get("end") or {}).get("value")
+        if not isinstance(first, int) or not isinstance(second, int):
+            continue
+        a, b = locate(first), locate(second)
+        if a is None or b is None:
+            warnings.append(
+                f"UniProt annotates a disulfide at {first}-{second}, which falls outside "
+                "the mature chains and was not carried over"
+            )
+            continue
+        description = str(feature.get("description") or "").strip()
+        modifications.append(
+            Modification(
+                kind=ModificationKind.DISULFIDE,
+                sites=(a, b),
+                description=(
+                    f"{a[0]}{a[1]}-{b[0]}{b[1]}"
+                    + (f" ({description})" if description else "")
+                    + f" [UniProt {first}-{second}]"
+                ),
+            )
+        )
+    return modifications, warnings
+
+
+def from_uniprot(
+    accession: str,
+    *,
+    name: str | None = None,
+    settings: Settings | None = None,
+    mature: bool = True,
+) -> ImportedTarget:
+    """Fetch a UniProt accession as the molecule the drug actually is.
+
+    A UniProt entry is the **precursor**. For insulin that is 110 residues of
+    preproinsulin — signal peptide, B chain, C peptide, A chain — which is a
+    different molecule from the 51-residue two-chain hormone. Importing it
+    whole gave a pI of 4.96 against the real 5.3, a charge and hydrophobicity
+    computed over a sequence that is a third propeptide, and no disulfides at
+    all, so every cysteine counted as a free thiol.
+
+    With ``mature=True`` (the default) the entry's own Chain and Peptide
+    annotations are used to trim it to the mature chains, and its Disulfide
+    bond annotations are renumbered onto them. For P01308 that reproduces the
+    hand-curated two-chain insulin exactly, disulfides included.
+
+    Nothing is inferred. Trimming and disulfides both come from annotations in
+    the entry, carry their precursor positions for audit, and are skipped
+    entirely when the entry does not state them. ``mature=False`` returns the
+    precursor as deposited.
     """
     s = settings or get_settings()
     identifier = accession.strip().upper()
@@ -332,28 +496,144 @@ def from_uniprot(
 
     parsed = parse_fasta(response.text)
     header = parsed.chains[0].description or identifier
-    return ImportedTarget(
-        # UniProt headers look like `sp|P01308|INS_HUMAN Insulin OS=Homo sapiens …`
-        name=name or readable_name(header) or identifier,
-        chains=[
+    resolved_name = name or readable_name(header) or identifier
+    precursor = parsed.chains[0].sequence
+    warnings = list(parsed.warnings)
+
+    chains: list[Chain] = []
+    modifications: list[Modification] = []
+    notes = (
+        "One chain, as UniProt describes one polypeptide. If the biologic is a "
+        "multi-chain assembly, import it from its PDB entry or paste each chain "
+        "so the chains stay separate."
+    )
+
+    if mature:
+        features, feature_warnings = _uniprot_features(identifier, s)
+        warnings.extend(feature_warnings)
+        if features:
+            chains, spans, trim_warnings = _mature_chains_from_features(precursor, features)
+            warnings.extend(trim_warnings)
+            if chains:
+                modifications, disulfide_warnings = _disulfides_from_features(
+                    features, spans, chains
+                )
+                warnings.extend(disulfide_warnings)
+                warnings.extend(_assembly_warnings(chains, modifications, resolved_name))
+                notes = (
+                    f"Trimmed from the {len(precursor)}-residue precursor to "
+                    f"{len(chains)} mature chain(s) using UniProt's Chain and Peptide "
+                    f"annotations, with {len(modifications)} annotated disulfide(s) "
+                    "renumbered onto them. The precursor is not the molecule that is "
+                    "formulated; import with mature=False to keep it."
+                )
+            else:
+                warnings.append(
+                    "UniProt annotates no mature chain for this entry, so the "
+                    "precursor sequence is used as deposited"
+                )
+
+    if not chains:
+        chains = [
             Chain(
                 chain_id="A",
-                sequence=parsed.chains[0].sequence,
+                sequence=precursor,
                 description=f"canonical sequence, UniProt {identifier}",
             )
-        ],
+        ]
+
+    return ImportedTarget(
+        # UniProt headers look like `sp|P01308|INS_HUMAN Insulin OS=Homo sapiens …`
+        name=resolved_name,
+        chains=chains,
         source="uniprot",
         source_detail=(
-            f"canonical sequence retrieved from {url} on {datetime.now(UTC).date().isoformat()}"
+            f"canonical sequence retrieved from {url} on "
+            f"{datetime.now(UTC).date().isoformat()}"
+            + (
+                "; mature chains and disulfides from "
+                + UNIPROT_FEATURES.format(accession=identifier)
+                if modifications or len(chains) > 1
+                else ""
+            )
         ),
         uniprot_id=identifier,
-        notes=(
-            "One chain, as UniProt describes one polypeptide. If the biologic is a "
-            "multi-chain assembly, import it from its PDB entry or paste each chain "
-            "so the chains stay separate."
-        ),
-        warnings=parsed.warnings,
+        notes=notes,
+        warnings=warnings,
+        modifications=modifications,
     )
+
+
+def _assembly_warnings(
+    chains: list[Chain], modifications: list[Modification], name: str
+) -> list[str]:
+    """Warn when the mature chains are probably not one molecule.
+
+    Trimming a precursor is right, but it does not establish that what is left
+    belongs together. Insulin's A and B chains are one hormone, held by two
+    interchain disulfides. Proglucagon's annotations yield eight peptides —
+    glucagon, GLP-1, GLP-2, glicentin and more — which are *different drugs*
+    that happen to share a precursor, and stitching them into one target
+    silently invents a 296-residue molecule that does not exist.
+
+    The discriminator is an interchain disulfide: with one, the chains are
+    covalently one assembly. Without one, several mature chains are a reason
+    to say so loudly rather than to guess.
+    """
+    if len(chains) < 2:
+        return []
+
+    linked: set[str] = set()
+    for modification in modifications:
+        ids = {site[0] for site in modification.sites}
+        if len(ids) > 1:
+            linked |= ids
+
+    unlinked = [chain.chain_id for chain in chains if chain.chain_id not in linked]
+    if not unlinked:
+        return []
+    how_many = (
+        "none of them are"
+        if len(unlinked) == len(chains)
+        else f"{len(unlinked)} of them are not"
+    )
+    return [
+        f"{name} yields {len(chains)} mature chains and {how_many}"
+        " joined by an annotated interchain disulfide. A precursor can encode "
+        "several separate products — proglucagon encodes glucagon, GLP-1 and "
+        "GLP-2 — and those are different biologics, not one multi-chain "
+        f"molecule. Check that chain(s) {', '.join(unlinked)} belong in this "
+        "target, and import the one peptide you mean if they do not."
+    ]
+
+
+def _uniprot_features(
+    accession: str, settings: Settings
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The entry's sequence features, or nothing plus the reason why.
+
+    A failure here is never fatal: the sequence has already been retrieved, so
+    the import degrades to the precursor with a warning rather than failing
+    outright over an annotation lookup.
+    """
+    url = UNIPROT_FEATURES.format(accession=accession)
+    try:
+        response = httpx.get(url, timeout=30.0, follow_redirects=True)
+    except httpx.HTTPError as exc:
+        return [], [f"UniProt feature annotations could not be retrieved ({exc})"]
+    if response.status_code != 200:
+        return [], [
+            f"UniProt returned HTTP {response.status_code} for the feature "
+            f"annotations of {accession}"
+        ]
+    try:
+        body = response.json()
+    except ValueError:
+        return [], ["UniProt's feature response was not JSON"]
+    features = body.get("features")
+    if not isinstance(features, list):
+        return [], []
+    return [f for f in features if isinstance(f, dict)], []
 
 
 def readable_name(header: str) -> str | None:
@@ -382,9 +662,11 @@ def build_biologic(
 ) -> Biologic:
     """Turn an import into a validated :class:`Biologic`.
 
-    Modifications are deliberately not inferred. A disulfide or a PEGylation
-    that nobody stated is not evidence, and an invented one would be carried
-    into every downstream claim.
+    Modifications are still never *inferred*. What is carried through is only
+    what the source stated: a disulfide reaches ``ImportedTarget.modifications``
+    because a UniProt annotation declared it, and arrives with its precursor
+    positions attached. A disulfide nobody stated remains absent, because an
+    invented one would be carried into every downstream claim.
     """
     try:
         resolved_class = BiologicClass(str(biologic_class))
@@ -399,6 +681,7 @@ def build_biologic(
         name=(name or imported.name).strip(),
         biologic_class=resolved_class,
         chains=tuple(imported.chains),
+        modifications=tuple(imported.modifications),
         pdb_id=imported.pdb_id,
         structure_source=imported.source_detail if imported.pdb_id else None,
         uniprot_id=imported.uniprot_id,
@@ -409,6 +692,7 @@ def build_biologic(
 __all__ = [
     "AMBIGUOUS",
     "ESM2_MAX_RESIDUES",
+    "UNIPROT_FEATURES",
     "ImportedTarget",
     "build_biologic",
     "from_pdb",
