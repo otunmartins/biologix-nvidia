@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biologix-nvidia"
+version = "0.1.0"
+description = "Research prototype for discovering polymer excipients that may improve biologic drug stability and delivery, with NVIDIA-accelerated components."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+readme = "README.md"
+
+# Pinned to versions actually resolved and exercised on the development
+# machine (Windows 10, Python 3.13.7, CPU-only). See docs/VERIFICATION.md.
+dependencies = [
+    "fastapi==0.120.4",
+    "uvicorn[standard]==0.38.0",
+    "pydantic==2.12.4",
+    "pydantic-settings==2.13.0",
+    "httpx==0.28.1",
+    "numpy==2.3.4",
+    "scipy==1.16.3",
+    "scikit-learn==1.7.2",
+    "pandas==2.3.3",
+    "rdkit==2025.3.6",
+    "sqlalchemy==2.0.44",
+    "python-multipart==0.0.20",
+    "jinja2==3.1.6",
+]
+
+[project.optional-dependencies]
+# OpenMM ships PyPI wheels including CPython 3.13 on Windows/Linux/macOS.
+# The wheel's CUDA platform only appears when a CUDA runtime is present.
+simulation = ["openmm==8.6.1"]
+
+# Model Context Protocol server.
+mcp = ["mcp==1.19.0"]
+
+# GPU-only. nvMolKit needs CUDA 12.6+ and compute capability >= 7.0, so it is
+# deliberately NOT in the default set: installing it on a CPU-only machine
+# would pull a multi-gigabyte CUDA torch build that cannot be used.
+#   uv pip install --torch-backend=cu128 nvmolkit
+gpu = ["nvmolkit>=0.3,<0.4"]
+
+dev = [
+    "pytest==8.4.2",
+    "pytest-asyncio==1.3.0",
+    "respx==0.22.0",
+    "ruff==0.15.1",
+]
+
+[project.scripts]
+biologix-mcp = "biologix.mcp_server:main"
+# Declared only once the target module exists — a console script that imports
+# nothing is a worse failure than a missing command.
+biologix-api = "biologix.api.app:main"
+#   biologix-demo = "biologix.cli:main"        # not written yet
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["biologix*"]
+
+[tool.setuptools.package-data]
+# biologix.targets ships no JSON today — built-in targets are defined in code
+# in registry.py. The glob is here for the external-target loader
+# (targets.registry.load_directory) and matches nothing yet.
+"biologix.targets" = ["builtin/*.json"]
+# "biologix.reports" templates are declared once that package exists.
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "gpu: requires an NVIDIA GPU (skipped automatically when absent)",
+    "network: requires outbound network access",
+    "slow: long-running simulation tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["backend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["B008"]
