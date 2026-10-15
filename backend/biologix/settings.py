@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -95,10 +95,15 @@ class Settings(BaseSettings):
     )
     job_workers: int = Field(default=2, alias="BIOLOGIX_JOB_WORKERS")
     # Off for localhost development; it must be on wherever the app is served
-    # over HTTPS, or the session cookie will travel in clear text.
-    session_cookie_secure: bool = Field(
-        default=False, alias="BIOLOGIX_SESSION_COOKIE_SECURE"
-    )
+    # over HTTPS, or the session cookie will travel in clear text. In
+    # ``production`` it defaults to on — see ``_harden_for_production``.
+    session_cookie_secure: bool = Field(default=False, alias="BIOLOGIX_SESSION_COOKIE_SECURE")
+
+    # --- deployment --------------------------------------------------------
+    #: ``development`` keeps the conveniences a local run needs; ``production``
+    #: turns the ones that are unsafe over a network into errors or defaults.
+    #: Nothing here guesses from hostnames: a deployment states what it is.
+    environment: str = Field(default="development", alias="BIOLOGIX_ENV")
 
     # --- reproducibility ---------------------------------------------------
     seed: int = Field(default=20260101, alias="BIOLOGIX_SEED")
@@ -114,6 +119,49 @@ class Settings(BaseSettings):
         if key not in lookup:
             raise ValueError(f"openmm_platform must be one of {sorted(allowed)}, got {v!r}")
         return lookup[key]
+
+    @field_validator("environment")
+    @classmethod
+    def _check_environment(cls, v: str) -> str:
+        allowed = {"development", "production"}
+        key = v.strip().lower()
+        if key not in allowed:
+            raise ValueError(f"environment must be one of {sorted(allowed)}, got {v!r}")
+        return key
+
+    @model_validator(mode="after")
+    def _harden_for_production(self) -> Settings:
+        """Make the production defaults safe, and refuse the unsafe override.
+
+        A secure cookie is not optional once a session travels over a network,
+        so production defaults it on. Explicitly setting it *off* in production
+        is refused rather than honoured: it is far more likely to be a leftover
+        from a developer's ``.env`` than a deliberate decision to send session
+        tokens in clear text. Terminating TLS at a proxy does not change this —
+        the cookie is still marked for HTTPS only, which is what we want.
+        """
+        if not self.is_production:
+            return self
+        if "session_cookie_secure" in self.model_fields_set:
+            if not self.session_cookie_secure:
+                raise ValueError(
+                    "BIOLOGIX_SESSION_COOKIE_SECURE=false is refused when "
+                    "BIOLOGIX_ENV=production: the session cookie would travel in "
+                    "clear text. Remove the override, or run with "
+                    "BIOLOGIX_ENV=development."
+                )
+        else:
+            self.session_cookie_secure = True
+        return self
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def is_postgres(self) -> bool:
+        """True when the store is a real database server rather than a file."""
+        return self.database_url.startswith(("postgresql", "postgres://"))
 
     @property
     def cors_origin_list(self) -> list[str]:

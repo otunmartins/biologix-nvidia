@@ -68,7 +68,7 @@ diversity falls back to the RDKit CPU backend and records that it did.
 uv venv && uv pip install -e ".[dev,simulation,mcp]"
 cp .env.example .env            # optional; everything has a working default
 
-pytest                          # 259 tests, no network, no GPU
+pytest                          # 307 tests, no network, no GPU
 python -m biologix.mcp_server --check
 biologix-api --reload           # http://127.0.0.1:8080/docs
 
@@ -81,6 +81,32 @@ goes through the Next.js server, so the backend's address stays out of client
 code, it needs no CORS entry for the app, and the session cookie stays
 HttpOnly in both directions. Point the app at another backend with
 `BIOLOGIX_API_URL`, which is read at runtime rather than baked into the build.
+
+### Running it on Postgres
+
+SQLite is the default so that a local run needs no database server. Nothing in
+the store is dialect-specific, so a deployed database is a URL swap plus a
+migration:
+
+```bash
+uv pip install -e ".[postgres]"
+export BIOLOGIX_DATABASE_URL="postgresql+psycopg://…?sslmode=require"
+export BIOLOGIX_ENV=production
+alembic upgrade head
+```
+
+The migration is not optional. Against anything but SQLite the application
+refuses to start on a database whose tables are missing, rather than creating
+them itself — so the schema always has a migration history behind it instead of
+being whatever the models happened to say on the day it was first run. On a
+serverless host such as Neon, connections are pre-pinged and recycled, because
+an idle pooled connection there is frequently already closed at the far end.
+
+`BIOLOGIX_ENV=production` defaults the session cookie to `Secure` and refuses
+an explicit attempt to turn that off. Session auth itself is unchanged and
+still carries the limits [accounts.py](backend/biologix/accounts.py) documents:
+no password reset, no MFA, and no account lockout or login rate limiting.
+Those are the gaps to close before this is exposed to the open internet.
 
 ## The application
 

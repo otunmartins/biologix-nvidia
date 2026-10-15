@@ -24,6 +24,7 @@ dependencies = [
     "pandas==2.3.3",
     "rdkit==2025.3.6",
     "sqlalchemy==2.0.44",
+    "alembic==1.20.0",
     "python-multipart==0.0.20",
     "jinja2==3.1.6",
 ]
@@ -32,6 +33,11 @@ dependencies = [
 # OpenMM ships PyPI wheels including CPython 3.13 on Windows/Linux/macOS.
 # The wheel's CUDA platform only appears when a CUDA runtime is present.
 simulation = ["openmm==8.6.1"]
+
+# Postgres driver. Not in the default set: a local SQLite run does not need
+# it, and the binary wheel is a needless download for anyone screening on
+# their laptop. Required wherever BIOLOGIX_DATABASE_URL points at Postgres.
+postgres = ["psycopg[binary]==3.3.6"]
 
 # Model Context Protocol server.
 mcp = ["mcp==1.19.0"]
