@@ -23,6 +23,7 @@ class TestProductionSettings:
     def test_production_defaults_the_session_cookie_to_secure(self, tmp_path: Path) -> None:
         settings = Settings(
             BIOLOGIX_ENV="production",
+            BIOLOGIX_DATABASE_URL=POSTGRES_URL,
             BIOLOGIX_DATA_DIR=tmp_path / "var",
             BIOLOGIX_CACHE_DIR=tmp_path / "cache",
         )
@@ -43,9 +44,44 @@ class TestProductionSettings:
             Settings(
                 BIOLOGIX_ENV="production",
                 BIOLOGIX_SESSION_COOKIE_SECURE="false",
+                BIOLOGIX_DATABASE_URL=POSTGRES_URL,
                 BIOLOGIX_DATA_DIR=tmp_path / "var",
                 BIOLOGIX_CACHE_DIR=tmp_path / "cache",
             )
+
+    def test_production_refuses_a_sqlite_store(self, tmp_path: Path) -> None:
+        """A forgotten BIOLOGIX_DATABASE_URL must not boot on a throwaway file.
+
+        The default is SQLite, so without this a deployment that lost its
+        database URL would run, take sign-ups and record decisions into a file
+        inside the container, and lose all of it on the next restart.
+        """
+        with pytest.raises(ValueError, match="lost on restart"):
+            Settings(
+                _env_file=None,
+                BIOLOGIX_ENV="production",
+                BIOLOGIX_DATA_DIR=tmp_path / "var",
+                BIOLOGIX_CACHE_DIR=tmp_path / "cache",
+            )
+
+    def test_production_accepts_postgres(self, tmp_path: Path) -> None:
+        settings = Settings(
+            BIOLOGIX_ENV="production",
+            BIOLOGIX_DATABASE_URL=POSTGRES_URL,
+            BIOLOGIX_DATA_DIR=tmp_path / "var",
+            BIOLOGIX_CACHE_DIR=tmp_path / "cache",
+        )
+        assert settings.is_production and settings.is_postgres
+        assert settings.session_cookie_secure is True
+
+    def test_development_still_defaults_to_sqlite(self, tmp_path: Path) -> None:
+        """The local run must stay a one-command affair."""
+        settings = Settings(
+            _env_file=None,
+            BIOLOGIX_DATA_DIR=tmp_path / "var",
+            BIOLOGIX_CACHE_DIR=tmp_path / "cache",
+        )
+        assert settings.database_url.startswith("sqlite")
 
     def test_an_unknown_environment_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="environment must be one of"):

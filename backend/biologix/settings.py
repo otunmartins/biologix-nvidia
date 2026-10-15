@@ -160,9 +160,26 @@ class Settings(BaseSettings):
         from a developer's ``.env`` than a deliberate decision to send session
         tokens in clear text. Terminating TLS at a proxy does not change this —
         the cookie is still marked for HTTPS only, which is what we want.
+
+        Production also refuses a SQLite store. This one is about a silent
+        failure rather than an unsafe setting: ``database_url`` defaults to a
+        local file, so a deployment that simply forgot to set
+        ``BIOLOGIX_DATABASE_URL`` would start perfectly happily on a database
+        inside the container — accept sign-ups, run campaigns, record
+        decisions — and lose all of it the next time the instance restarted.
+        Nothing would look wrong until the data was already gone.
         """
         if not self.is_production:
             return self
+
+        if self.database_url.startswith("sqlite"):
+            raise ValueError(
+                "BIOLOGIX_ENV=production with a SQLite database_url. SQLite in a "
+                "deployed container is per-instance and lost on restart, so this "
+                "is almost always a missing BIOLOGIX_DATABASE_URL rather than a "
+                "deliberate choice. Set the Postgres URL, or run with "
+                "BIOLOGIX_ENV=development."
+            )
         if "session_cookie_secure" in self.model_fields_set:
             if not self.session_cookie_secure:
                 raise ValueError(

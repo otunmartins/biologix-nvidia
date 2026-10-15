@@ -171,7 +171,11 @@ Deploying does not change these, and none is hypothetical:
   back.
 - **Backups** are whatever Neon's retention gives you. Know what that is
   before you rely on it.
-- **The image has not been built locally.** App Platform's first build is the
-  first real test of `docker/Dockerfile`. The risk is a dependency without a
-  cp313 manylinux wheel, which fails the build rather than shipping something
-  broken.
+- **The image has not been built end to end.** A local build was attempted and
+  failed for an environmental reason — the Docker VM could not reach
+  `pypi.org` — not because of anything in the Dockerfile. The substantive
+  risk it would have caught was a dependency with no cp313 manylinux wheel,
+  since `python:3.13-slim` carries no compiler; that was checked against PyPI
+  instead, and numpy, scipy, scikit-learn, pandas, RDKit, psycopg-binary and
+  pydantic-core all publish one at the pinned versions. App Platform's first
+  build remains the first full test.

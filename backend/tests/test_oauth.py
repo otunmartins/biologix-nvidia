@@ -54,10 +54,14 @@ def id_token(**overrides: Any) -> str:
     return f"{_b64({'alg': 'RS256'})}.{_b64(claims)}.not-a-real-signature"
 
 
+# _env_file=None on every Settings below: without it these read the developer's
+# real .env, so the suite would pass or fail depending on whether that machine
+# happens to have Google credentials and a domain restriction configured.
 @pytest.fixture
 def settings(tmp_path: Path) -> Iterator[Settings]:
     reset_engine_cache()
     yield Settings(
+        _env_file=None,
         BIOLOGIX_DATA_DIR=tmp_path / "var",
         BIOLOGIX_CACHE_DIR=tmp_path / "cache",
         BIOLOGIX_DATABASE_URL=f"sqlite+pysqlite:///{(tmp_path / 'oauth.db').as_posix()}",
@@ -72,6 +76,7 @@ def settings(tmp_path: Path) -> Iterator[Settings]:
 def unconfigured(tmp_path: Path) -> Iterator[Settings]:
     reset_engine_cache()
     yield Settings(
+        _env_file=None,
         BIOLOGIX_DATA_DIR=tmp_path / "var",
         BIOLOGIX_CACHE_DIR=tmp_path / "cache",
         BIOLOGIX_DATABASE_URL=f"sqlite+pysqlite:///{(tmp_path / 'plain.db').as_posix()}",
@@ -145,6 +150,7 @@ class TestAuthorisationRequest:
 
     def test_a_single_allowed_domain_is_hinted_to_google(self, tmp_path: Path) -> None:
         settings = Settings(
+            _env_file=None,
             BIOLOGIX_DATA_DIR=tmp_path / "var",
             GOOGLE_CLIENT_ID=CLIENT_ID,
             GOOGLE_CLIENT_SECRET="x",
@@ -197,6 +203,7 @@ class TestIdTokenValidation:
 
     def test_a_domain_outside_the_allow_list_is_refused(self, tmp_path: Path) -> None:
         settings = Settings(
+            _env_file=None,
             BIOLOGIX_DATA_DIR=tmp_path / "var",
             GOOGLE_CLIENT_ID=CLIENT_ID,
             GOOGLE_CLIENT_SECRET="x",
