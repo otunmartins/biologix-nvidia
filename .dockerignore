@@ -1,0 +1,28 @@
+# Keep the build context small and keep credentials out of it. Anything
+# listed here cannot end up in an image layer even by accident.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+frontend/disabled-git-stray
+
+# The frontend deploys separately (see docs/DEPLOYMENT.md); none of it belongs
+# in the API image.
+frontend
+
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Runtime data: generated, never shipped.
+var
+examples/*/structures
+
+docs
