@@ -5,195 +5,173 @@ this app is put together.
 
 ## The short version
 
-**GoDaddy holds the domain. It does not host the app.** Point DNS at two
-platforms that can run it, and keep `algonix.co.uk` where it is.
+Everything runs as one DigitalOcean App Platform app, built from this
+repository. GoDaddy keeps the domain and serves DNS. Neon stays as the
+database.
 
-| Piece | Where | Why there |
+| Piece | Where | Public? |
 |---|---|---|
-| `app.algonix.co.uk` — Next.js console | Vercel | Next.js runs natively; nothing to configure |
-| `api.algonix.co.uk` — Python API | Render, Railway or Fly.io | Needs one long-running container |
-| Database | Neon Postgres | Already what the store expects |
-| DNS for both | GoDaddy | Where the domain already is |
+| `app.algonix.co.uk` — Next.js console | App Platform `web` component | yes |
+| The Python API | App Platform `api` component | **no** |
+| Schema migration | App Platform `migrate` job (`PRE_DEPLOY`) | n/a |
+| Database | Neon Postgres | — |
+| DNS | GoDaddy | — |
+
+**There is no registry step.** App Platform builds `docker/Dockerfile` directly
+from GitHub on each push to `main`. You only need Docker Hub or DOCR if you
+want to build somewhere other than App Platform.
+
+## Why the API has no public address
+
+This is the part worth understanding, because it is the main reason to keep
+both halves on one platform.
+
+The browser already never talks to the Python API: every call goes through the
+Next.js server, which proxies it. So a public hostname for the API would be
+attack surface serving no purpose. App Platform lets a component declare
+`internal_ports` with no `http_port`, which gives it no public hostname at
+all — it is reachable at `http://api:8080` from inside the app and from
+nowhere else.
+
+The result: there is no `api.algonix.co.uk` for anyone to find, no CORS entry
+to get wrong, and the only door into the system is the console itself.
 
 ## Why not GoDaddy hosting
 
-This is not a preference. GoDaddy's standard cPanel shared plans serve PHP,
-static files and MySQL. Three things in this app rule that out:
+Not a preference. GoDaddy's standard cPanel plans serve PHP, static files and
+MySQL. Three things rule that out:
 
 1. **FastAPI is ASGI.** cPanel's Python support runs through Passenger, which
-   speaks WSGI. FastAPI needs an ASGI server, so shared cPanel needs a
-   workaround at best.
-2. **RDKit, SciPy, scikit-learn and pandas are native extensions**, several
-   hundred megabytes of compiled wheels. Shared hosting disk and memory
-   quotas are not built for this, and there is no compiler available if a
-   wheel is missing.
+   speaks WSGI.
+2. **RDKit, SciPy, scikit-learn and pandas are native extensions** — several
+   hundred megabytes of compiled wheels, with no compiler available if one is
+   missing.
 3. **The job queue is an in-process thread pool** that must keep running
-   between requests. Shared hosting reaps long-running processes; that is the
-   product working as intended.
+   between requests. Shared hosting reaps long-running processes by design.
 
-There is no Postgres on those plans either — MySQL only — and the store is
-Postgres or SQLite.
+There is no Postgres on those plans either. A GoDaddy VPS with root could run
+this via Docker, if you would rather keep one vendor — it means you own TLS
+renewal, the firewall, OS patching and uptime.
 
-GoDaddy also sells VPS plans with root access, and those *can* run this via
-Docker. That is a real option if you would rather keep one vendor; it means
-you own TLS renewal, the firewall, OS patching and uptime. The managed route
-below is less work and is what the rest of this guide assumes.
+## 1. Check the spec, then create the app
 
-## Before you start
+[`.do/app.yaml`](../.do/app.yaml) is the whole deployment, and its comments
+explain each decision. Two fields are worth confirming against DigitalOcean's
+current values before the first create, because they change over time:
 
-Three accounts: Vercel, a container host (Render is the least fiddly), and
-Neon. All three have free tiers sufficient to see this working end to end.
-
-> **Create every secret on a machine you trust.** A connection string, a
-> Google client secret and an NVIDIA API key are all bearer credentials: the
-> machine you paste them on can read them. If that machine has a TLS
-> intercepting proxy installed, pasting a secret there is publishing it.
-
-## 1. Database
-
-Create a Neon project and copy the connection string. Change the scheme to
-`postgresql+psycopg` and keep `sslmode=require`:
-
-```
-postgresql+psycopg://user:password@ep-xxx-pooler.region.aws.neon.tech/dbname?sslmode=require
-```
-
-Prefer the **pooled** host (`-pooler`) for a web application.
-
-The schema is created by migration, never by the app:
+- `region: lon` — closest region to you
+- `instance_size_slug:` — the paid instance sizes get renamed periodically
 
 ```bash
-export BIOLOGIX_DATABASE_URL="postgresql+psycopg://…"
-alembic upgrade head
+doctl apps spec validate --spec .do/app.yaml   # catches both
+doctl apps create --spec .do/app.yaml
 ```
 
-Run this once now, and as a release step on every deploy that changes the
-schema. The app refuses to start against a database whose tables are missing
-rather than creating them itself, so a forgotten migration fails loudly at
-boot instead of quietly at the first query.
+Later changes are `doctl apps update <app-id> --spec .do/app.yaml`.
 
-## 2. API
+## 2. Set the secrets
 
-Deploy `docker/Dockerfile` from the repository root. On Render: New → Web
-Service → point at the repo → Docker → Dockerfile path `docker/Dockerfile`.
+**Not in the spec file, ever.** Set them in the dashboard under Settings →
+App-Level Environment Variables with type **Secret**, or pass them on the
+command line:
 
-**Settings that are not optional:**
+| Variable | Value |
+|---|---|
+| `BIOLOGIX_DATABASE_URL` | your Neon string, `postgresql+psycopg://…?sslmode=require` |
+| `NVIDIA_API_KEY` | from build.nvidia.com |
+| `GOOGLE_CLIENT_ID` | from the Google console |
+| `GOOGLE_CLIENT_SECRET` | from the Google console |
 
-- **Instance count: 1.** Not autoscaled. The job queue lives in process
-  memory, so a second instance holds jobs the first cannot see, and a
-  campaign started on one is invisible to the other. `abandon_orphaned_work`
-  marks interrupted jobs at startup so a restart shows an honest failure
-  rather than a spinner that never resolves — but it cannot recover the work.
-- **Not serverless.** A function that sleeps between requests kills
-  in-flight campaigns. The container must stay up.
-- **Health check path: `/health`.**
-- **Release command: `alembic upgrade head`.**
-
-Environment variables:
-
-```bash
-BIOLOGIX_ENV=production
-BIOLOGIX_DATABASE_URL=postgresql+psycopg://…?sslmode=require
-NVIDIA_API_KEY=nvapi-…
-# Google sign-in — omit both and the button simply does not appear
-GOOGLE_CLIENT_ID=…apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=…
-GOOGLE_REDIRECT_URI=https://app.algonix.co.uk/api/bx/auth/google/callback
-GOOGLE_ALLOWED_DOMAINS=algonix.co.uk
-```
+Everything non-secret is already in the spec: `BIOLOGIX_ENV=production`,
+`BIOLOGIX_API_URL=http://api:8080`, the Google redirect URI and the allowed
+domain.
 
 `BIOLOGIX_ENV=production` forces the session cookie to `Secure` and refuses an
-explicit attempt to turn that off. You do not set
+explicit attempt to turn that off, so you never set
 `BIOLOGIX_SESSION_COOKIE_SECURE` yourself.
 
-Note the redirect URI points at **app**, not **api**. That is correct and
-explained in step 5.
+## 3. The migration runs itself
 
-## 3. Frontend
+The `migrate` job is `kind: PRE_DEPLOY`, so it runs before each release and
+**gates it** — a failed migration means the new version does not go live. It
+uses the same image as the API, so it applies exactly the revisions that
+shipped with that build.
 
-Deploy `frontend/` to Vercel. Root directory `frontend`; the framework is
-detected automatically.
-
-One environment variable:
-
-```bash
-BIOLOGIX_API_URL=https://api.algonix.co.uk
-```
-
-It is read at runtime, not inlined at build time, so pointing the app at a
-different backend is a redeploy of configuration rather than of code. It is
-deliberately **not** `NEXT_PUBLIC_`: the browser never learns the API's
-address, because every call goes through the Next.js server.
+This matters because the app refuses to start against a database whose tables
+are missing, rather than creating them itself. A forgotten migration fails
+loudly at boot instead of quietly at the first query.
 
 ## 4. DNS at GoDaddy
 
-In GoDaddy: **My Products → Domains → algonix.co.uk → DNS → Manage Zones**.
-
-Add what each platform asks for — the exact values come from their dashboards,
-and inventing them here would be guessing:
+**My Products → Domains → algonix.co.uk → DNS → Manage Zones.** One record:
 
 | Type | Name | Points to |
 |---|---|---|
-| `CNAME` | `app` | the hostname Vercel gives you (typically `cname.vercel-dns.com`) |
-| `CNAME` | `api` | the hostname your container host gives you |
+| `CNAME` | `app` | the hostname App Platform shows for the app |
 
-Then add the custom domain **inside each platform too** — DNS alone does not
-tell Vercel that it should answer for `app.algonix.co.uk`, and the TLS
-certificate is issued from that side.
+Take the exact target from the app's Settings → Domains page. Adding the
+domain inside App Platform is what triggers the TLS certificate; DNS alone
+does not tell it to answer for that name.
 
-Leave the root `algonix.co.uk` records alone. Nothing here touches your main
+Leave the root `algonix.co.uk` records alone — nothing here touches your main
 site or email. Propagation is usually minutes; allow an hour before
 concluding something is wrong.
 
 ## 5. Google sign-in
 
-In the Google Cloud console: **APIs & Services → Credentials → your OAuth
-client**.
+In the Google Cloud console, **APIs & Services → Credentials → your OAuth
+client**:
 
 - Authorised JavaScript origin: `https://app.algonix.co.uk`
 - Authorised redirect URI:
   `https://app.algonix.co.uk/api/bx/auth/google/callback`
 
-Character for character — a trailing slash is a different URI, and the error
-Google returns is `redirect_uri_mismatch`.
+Character for character — a trailing slash is a different URI, and Google
+returns `redirect_uri_mismatch`.
 
-**Why the callback goes to `app` and not `api`:** the session cookie has to be
-set on the origin the browser is actually using. Google sends the browser to
-`app.algonix.co.uk`, the Next.js proxy forwards the request to the API, and the
-API answers with `Set-Cookie` and a redirect that the proxy passes back. A
-callback pointed at `api.algonix.co.uk` would set a cookie for the wrong host
-and sign nobody in.
+**The callback points at the console, not the API**, which has no public
+address to point at anyway. Google redirects the browser to
+`app.algonix.co.uk`, the Next.js proxy forwards it inward, and the API answers
+with `Set-Cookie` and a redirect that the proxy relays back. The cookie has to
+be set on the origin the browser is using.
+
+Keep the local `http://localhost:3000/...` redirect URI registered too — one
+client can hold several, so development keeps working.
 
 ## 6. Check it
 
 ```bash
-curl -s https://api.algonix.co.uk/health
-# {"status":"ok"}
-
 curl -s https://app.algonix.co.uk/api/bx/health
-# {"status":"ok"}   <- proves the proxy reaches the API
+# {"status":"ok"}   <- the console reached the API over the internal network
 
 curl -s https://app.algonix.co.uk/api/bx/auth/providers
-# google.configured: true, once the credentials are set
+# google.configured: true
 ```
 
-Then open `https://app.algonix.co.uk`, register, and walk one campaign.
+There is deliberately no public API URL to curl. If `/api/bx/health` returns
+`503`, the `web` component cannot reach `api` — check that `BIOLOGIX_API_URL`
+is `http://api:8080` and that the service is named `api`.
 
-If the second command fails while the first succeeds, `BIOLOGIX_API_URL` is
-wrong or the API is not reachable from Vercel. The proxy answers `503` with
-the address it tried, which names the problem.
+Then open the site, sign in, and run one campaign.
 
 ## What is not production-ready yet
 
 Deploying does not change these, and none is hypothetical:
 
-- **One instance only.** In-flight work dies on restart. Making the queue
-  durable in Postgres is the fix, and it is the largest remaining gap.
-- **No login rate limiting or account lockout.** `accounts.py` says so
-  itself. Google sign-in sidesteps it for anyone who uses it; the password
-  path does not.
+- **One instance, not autoscaled.** The queue is in-process, so in-flight work
+  dies on restart and a second instance would hold jobs the first cannot see.
+  Making the queue durable in Postgres is the largest remaining gap, and it is
+  the thing that would let this scale at all.
+- **No login rate limiting or account lockout.** `accounts.py` says so itself.
+  Google sign-in sidesteps it for anyone who uses it; the password path does
+  not.
 - **No password reset and no MFA.**
 - **No GPU.** nvMolKit and OpenMM CUDA stay unavailable on any CPU host, and
-  `availability_report()` reports that per adapter rather than silently
-  falling back.
-- **Backups.** Neon has its own; know its retention before you rely on it.
+  `availability_report()` says so per adapter rather than silently falling
+  back.
+- **Backups** are whatever Neon's retention gives you. Know what that is
+  before you rely on it.
+- **The image has not been built locally.** App Platform's first build is the
+  first real test of `docker/Dockerfile`. The risk is a dependency without a
+  cp313 manylinux wheel, which fails the build rather than shipping something
+  broken.

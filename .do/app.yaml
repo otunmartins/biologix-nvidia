@@ -1,0 +1,116 @@
+# DigitalOcean App Platform spec for app.algonix.co.uk
+#
+# Two components and one job. The shape of this file is the whole security
+# argument, so it is worth reading rather than copying:
+#
+#   web      Next.js. The only component with a public address.
+#   api      The Python API. internal_ports with no http_port, so App Platform
+#            gives it NO public hostname at all. It is reachable at
+#            http://api:8080 from inside the app and from nowhere else.
+#   migrate  A PRE_DEPLOY job running `alembic upgrade head`. It gates the
+#            release: if the migration fails the new version does not go live.
+#
+# That the API has no public address is not a hardening afterthought — the
+# browser already never talks to it directly, so a public hostname would be
+# attack surface serving no purpose. There is no api.algonix.co.uk to find,
+# and no CORS entry to get wrong.
+#
+# Apply with:
+#     doctl apps create --spec .do/app.yaml
+#     doctl apps update <app-id> --spec .do/app.yaml
+#
+# SECRETS ARE NOT IN THIS FILE and must never be. Set them once in the
+# dashboard (Settings -> App-Level Environment Variables, type Secret) or:
+#     doctl apps update <app-id> --spec .do/app.yaml \
+#       --env "BIOLOGIX_DATABASE_URL=..." ...
+# Required secrets: BIOLOGIX_DATABASE_URL, NVIDIA_API_KEY,
+#                   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+name: biologix
+region: lon
+
+domains:
+  - domain: app.algonix.co.uk
+    type: PRIMARY
+
+services:
+  # ---------------------------------------------------------------------
+  # The console. Public, and the only thing that is.
+  # ---------------------------------------------------------------------
+  - name: web
+    github:
+      repo: otunmartins/biologix-nvidia
+      branch: main
+      deploy_on_push: true
+    source_dir: frontend
+    environment_slug: node-js
+    build_command: npm ci && npm run build
+    # package.json pins `next start -p 3000`, which would ignore the port App
+    # Platform assigns. $PORT is honoured here instead.
+    run_command: npx next start -p ${PORT}
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /login
+    envs:
+      # Internal service name. Not NEXT_PUBLIC_: the browser must never learn
+      # the API's address, and this is read at runtime, not inlined at build.
+      - key: BIOLOGIX_API_URL
+        scope: RUN_TIME
+        value: http://api:8080
+
+  # ---------------------------------------------------------------------
+  # The API. No public hostname.
+  # ---------------------------------------------------------------------
+  - name: api
+    github:
+      repo: otunmartins/biologix-nvidia
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: docker/Dockerfile
+    # internal_ports with no http_port is what keeps this off the internet.
+    internal_ports:
+      - 8080
+    # ONE INSTANCE, AND NOT AUTOSCALED. The job queue is an in-process thread
+    # pool, so a second instance would hold campaigns the first cannot see,
+    # and a request routed to the wrong one would report a job as missing.
+    # Making the queue durable in Postgres is what would lift this.
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-2gb
+    envs:
+      # Pinned so the declared internal port and the listening port agree.
+      - key: PORT
+        scope: RUN_TIME
+        value: "8080"
+      - key: BIOLOGIX_ENV
+        scope: RUN_TIME
+        value: production
+      # Must be the public origin the browser uses, not this service's name:
+      # Google redirects the browser, and the session cookie has to be set on
+      # the host the browser is actually talking to.
+      - key: GOOGLE_REDIRECT_URI
+        scope: RUN_TIME
+        value: https://app.algonix.co.uk/api/bx/auth/google/callback
+      # Restricts who may sign in with Google at all. Empty would mean any
+      # Google account on earth with a verified address.
+      - key: GOOGLE_ALLOWED_DOMAINS
+        scope: RUN_TIME
+        value: algonix.co.uk
+
+jobs:
+  # ---------------------------------------------------------------------
+  # The schema, before the code that depends on it.
+  # ---------------------------------------------------------------------
+  - name: migrate
+    kind: PRE_DEPLOY
+    github:
+      repo: otunmartins/biologix-nvidia
+      branch: main
+      deploy_on_push: true
+    # The same image as the API, so the migration runs against exactly the
+    # revisions that shipped with this build rather than a separately
+    # installed Alembic.
+    dockerfile_path: docker/Dockerfile
+    run_command: alembic upgrade head
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
