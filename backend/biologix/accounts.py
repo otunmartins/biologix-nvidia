@@ -32,7 +32,7 @@ from typing import Any
 from sqlalchemy import select
 
 from biologix.store.database import session_scope
-from biologix.store.models import Session, User
+from biologix.store.models import Identity, Session, User, as_utc
 
 ITERATIONS = 240_000
 SESSION_DAYS = 14
@@ -124,11 +124,86 @@ def authenticate(*, email: str, password: str, url: str | None = None) -> dict[s
     with session_scope(url) as session:
         user = session.scalars(select(User).where(User.email == address)).first()
         # The same refusal either way, so this cannot be used to find out
-        # which addresses have accounts.
-        if user is None or not verify_password(password, user.password_hash):
+        # which addresses have accounts — or which of them are Google-only,
+        # since a null password hash gives the identical answer rather than
+        # "this account signs in with Google".
+        if (
+            user is None
+            or user.password_hash is None
+            or not verify_password(password, user.password_hash)
+        ):
             raise AuthError("those credentials do not match an account")
         user.last_seen_at = _now()
         return user.to_dict()
+
+
+def sign_in_with_identity(
+    *,
+    provider: str,
+    subject: str,
+    email: str,
+    display_name: str,
+    role: str = "scientist",
+    url: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Sign in whoever this external identity belongs to, creating them if new.
+
+    Returns the user and whether the account was created, so the caller can
+    write the right audit line.
+
+    The lookup order matters and is deliberate:
+
+    1. **The provider's subject.** Stable, never reused, and the only thing
+       that is genuinely this person's identifier.
+    2. **A verified email, once.** This is the link step: someone who already
+       has a password account and then signs in with Google should land in
+       their own account rather than a duplicate. It is safe only because the
+       caller has already refused unverified addresses — linking on an
+       unverified email would let anyone claim an existing account by
+       asserting its address.
+    3. **Otherwise a new account**, with the provider's name and no password.
+    """
+    address = normalise_email(email)
+    name = display_name.strip() or address.partition("@")[0]
+    if role not in ROLES:
+        raise AuthError(f"unknown role {role!r}; use one of {', '.join(ROLES)}")
+
+    with session_scope(url) as session:
+        identity = session.get(Identity, (provider, subject))
+        if identity is not None:
+            user = session.get(User, identity.user_id)
+            if user is None:  # pragma: no cover - cascade makes this unreachable
+                raise AuthError("that identity points at an account that no longer exists")
+            identity.last_used_at = _now()
+            identity.email = address
+            user.last_seen_at = _now()
+            return user.to_dict(), False
+
+        user = session.scalars(select(User).where(User.email == address)).first()
+        created = user is None
+        if user is None:
+            user = User(
+                id=uuid.uuid4().hex[:16],
+                email=address,
+                display_name=name,
+                role=role,
+                password_hash=None,
+            )
+            session.add(user)
+            session.flush()
+
+        session.add(
+            Identity(
+                provider=provider,
+                subject=subject,
+                user_id=user.id,
+                email=address,
+                last_used_at=_now(),
+            )
+        )
+        user.last_seen_at = _now()
+        session.flush()
+        return user.to_dict(), created
 
 
 def start_session(
@@ -157,11 +232,7 @@ def user_for_token(token: str, *, url: str | None = None) -> dict[str, Any] | No
         record = session.get(Session, hash_token(token))
         if record is None:
             return None
-        expires = record.expires_at
-        if expires.tzinfo is None:
-            # SQLite hands back naive datetimes; they were stored as UTC.
-            expires = expires.replace(tzinfo=UTC)
-        if expires <= _now():
+        if as_utc(record.expires_at) <= _now():
             session.delete(record)
             return None
         user = session.get(User, record.user_id)

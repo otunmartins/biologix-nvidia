@@ -29,6 +29,19 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def as_utc(value: datetime) -> datetime:
+    """Make a stored timestamp safe to compare against :func:`_now`.
+
+    ``DateTime(timezone=True)`` is honoured by Postgres, which gives back an
+    aware datetime, and ignored by SQLite, which gives back a naive one. Every
+    timestamp in this schema is written as UTC, so a naive value is UTC that
+    merely lost its label. Comparing the two kinds raises TypeError, which is
+    the sort of bug that passes every test on SQLite and fails in production
+    on the first expiry check.
+    """
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -290,7 +303,10 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(120))
     # scientist | computational | reviewer
     role: Mapped[str] = mapped_column(String(24), default="scientist")
-    password_hash: Mapped[str] = mapped_column(String(255))
+    # Null for an account that has only ever signed in through an identity
+    # provider. Such a user has no password to verify, and password sign-in
+    # must refuse them rather than compare against an empty string.
+    password_hash: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -321,6 +337,57 @@ class Session(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     user_agent: Mapped[str | None] = mapped_column(String(300))
+
+
+class Identity(Base):
+    """An external account that may sign in as a :class:`User`.
+
+    Separate from ``users`` rather than a pair of columns on it, because one
+    person legitimately arrives by more than one route — a password today, a
+    Google account tomorrow — and because the provider's own identifier is the
+    thing that must be unique, not the email.
+
+    Matching on ``subject`` and not on email is the point. Google's ``sub`` is
+    stable and never reused; an email address can be reassigned inside a
+    workspace, and treating it as the identity would hand a new employee the
+    previous holder's audit history.
+    """
+
+    __tablename__ = "identities"
+
+    #: provider + the provider's immutable id for this person.
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: What the provider last told us, kept for display and for audit only.
+    email: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OAuthFlow(Base):
+    """One in-flight authorisation, remembered server-side.
+
+    The ``state`` and PKCE verifier cannot live in a cookie here: the callback
+    arrives from Google through the Next.js proxy, and a flow that depends on
+    cookie round-tripping across that hop is a flow that breaks quietly. They
+    are rows instead, which also makes single use enforceable — a replayed
+    callback finds ``consumed_at`` already set and is refused.
+    """
+
+    __tablename__ = "oauth_flows"
+
+    state: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    #: PKCE: proves the code is being redeemed by whoever requested it.
+    code_verifier: Mapped[str] = mapped_column(String(128))
+    #: Replay protection for the ID token itself.
+    nonce: Mapped[str] = mapped_column(String(64))
+    #: Where to send the browser afterwards, validated as a relative path.
+    next_path: Mapped[str] = mapped_column(String(300), default="/")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Project(Base):

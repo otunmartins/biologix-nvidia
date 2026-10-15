@@ -68,7 +68,7 @@ diversity falls back to the RDKit CPU backend and records that it did.
 uv venv && uv pip install -e ".[dev,simulation,mcp]"
 cp .env.example .env            # optional; everything has a working default
 
-pytest                          # 307 tests, no network, no GPU
+pytest                          # 337 tests, no network, no GPU
 python -m biologix.mcp_server --check
 biologix-api --reload           # http://127.0.0.1:8080/docs
 
@@ -103,10 +103,32 @@ serverless host such as Neon, connections are pre-pinged and recycled, because
 an idle pooled connection there is frequently already closed at the far end.
 
 `BIOLOGIX_ENV=production` defaults the session cookie to `Secure` and refuses
-an explicit attempt to turn that off. Session auth itself is unchanged and
-still carries the limits [accounts.py](backend/biologix/accounts.py) documents:
-no password reset, no MFA, and no account lockout or login rate limiting.
-Those are the gaps to close before this is exposed to the open internet.
+an explicit attempt to turn that off.
+
+### Google sign-in
+
+Optional, and off until two environment variables are set — `GOOGLE_CLIENT_ID`
+and `GOOGLE_CLIENT_SECRET`. Until then `/auth/providers` reports it as
+unconfigured, the sign-in page omits the button, and the endpoints refuse with
+a reason rather than half-redirecting somewhere.
+
+It is implemented in the Python API, not with Auth.js in the Next.js layer, so
+that there is one session authority. Google proves who someone is; the session
+it produces is the same cookie a password sign-in produces, which is what keeps
+the audit trail — every campaign, decision and analysis carries a `user_id` —
+keyed to identities this API issued. An authorisation code flow with PKCE
+(S256), a single-use `state` row, and a `nonce` bound to it; accounts are
+matched on Google's immutable `sub` rather than on an email address, because an
+address can be reassigned inside a workspace and the audit history must not be
+reassigned with it. A verified address links a Google login to an existing
+password account once, so signing in with Google does not create a duplicate of
+yourself.
+
+Session auth still carries the limits [accounts.py](backend/biologix/accounts.py)
+documents: no password reset, no MFA, and no account lockout or login rate
+limiting. Google sign-in sidesteps the first three for anyone who uses it, but
+the password path is unchanged, and rate limiting is absent on both. Those are
+the gaps to close before this is exposed to the open internet.
 
 ## The application
 

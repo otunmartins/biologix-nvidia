@@ -99,6 +99,27 @@ class Settings(BaseSettings):
     # ``production`` it defaults to on — see ``_harden_for_production``.
     session_cookie_secure: bool = Field(default=False, alias="BIOLOGIX_SESSION_COOKIE_SECURE")
 
+    # --- Google sign-in ----------------------------------------------------
+    # Unset by default, and that is a working state: /auth/providers reports
+    # Google as unconfigured, the sign-in page omits the button, and the
+    # endpoints refuse with a reason instead of half-redirecting somewhere.
+    # Filling these three in is the whole change.
+    google_client_id: str | None = Field(default=None, alias="GOOGLE_CLIENT_ID")
+    google_client_secret: str | None = Field(default=None, alias="GOOGLE_CLIENT_SECRET")
+    #: Must match a redirect URI registered on the Google credential exactly,
+    #: and must point at the *frontend* proxy rather than at this API — the
+    #: session cookie has to be set on the origin the browser is using.
+    google_redirect_uri: str = Field(
+        default="http://localhost:3000/api/bx/auth/google/callback",
+        alias="GOOGLE_REDIRECT_URI",
+    )
+    #: Optional: comma-separated email domains allowed to sign in this way.
+    #: Empty means any Google account with a verified email, which is rarely
+    #: what an internal tool wants.
+    google_allowed_domains: str = Field(default="", alias="GOOGLE_ALLOWED_DOMAINS")
+    #: Where the browser lands after a successful sign-in.
+    oauth_success_path: str = Field(default="/", alias="BIOLOGIX_OAUTH_SUCCESS_PATH")
+
     # --- deployment --------------------------------------------------------
     #: ``development`` keeps the conveniences a local run needs; ``production``
     #: turns the ones that are unsafe over a network into errors or defaults.
@@ -159,6 +180,18 @@ class Settings(BaseSettings):
         return self.environment == "production"
 
     @property
+    def google_oauth_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
+
+    @property
+    def google_allowed_domain_list(self) -> list[str]:
+        return [
+            d.strip().lower().lstrip("@")
+            for d in self.google_allowed_domains.split(",")
+            if d.strip()
+        ]
+
+    @property
     def is_postgres(self) -> bool:
         """True when the store is a real database server rather than a file."""
         return self.database_url.startswith(("postgresql", "postgres://"))
@@ -178,7 +211,7 @@ class Settings(BaseSettings):
     def redacted(self) -> dict[str, object]:
         """Configuration safe to embed in a provenance manifest."""
         data = self.model_dump(mode="json")
-        for secret in ("nvidia_api_key", "ngc_api_key"):
+        for secret in ("nvidia_api_key", "ngc_api_key", "google_client_secret"):
             data[secret] = "<set>" if getattr(self, secret) else "<unset>"
         return data
 

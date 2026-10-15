@@ -43,7 +43,13 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from biologix.api import auth_routes, run_routes, target_routes, workspace_routes
+from biologix.api import (
+    auth_routes,
+    oauth_routes,
+    run_routes,
+    target_routes,
+    workspace_routes,
+)
 from biologix.api.deps import CurrentUser, OptionalUser
 from biologix.jobs import JobQueue
 from biologix.nvidia import availability_report
@@ -96,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(auth_routes.build_router(s))
+    app.include_router(oauth_routes.build_router(s))
     app.include_router(workspace_routes.build_router(s))
     app.include_router(target_routes.build_router(s))
     app.include_router(run_routes.build_router(s))

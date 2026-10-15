@@ -67,6 +67,13 @@ async function proxy(request: Request, path: string[]): Promise<Response> {
   const out = new Headers({ "cache-control": "no-store" });
   const contentType = response.headers.get("content-type");
   if (contentType) out.set("content-type", contentType);
+  // `redirect: "manual"` above means a 3xx arrives here intact rather than
+  // being followed server-side. The browser can only act on it if Location
+  // comes with it, which is what makes the OAuth callback work: Google sends
+  // the browser to this proxy path, the API answers 303 + Set-Cookie, and
+  // both have to reach the browser together.
+  const location = response.headers.get("location");
+  if (location) out.set("location", location);
   // Sign-in and sign-out set and clear the session; both must reach the
   // browser exactly as the API wrote them.
   for (const [name, value] of response.headers.entries()) {
