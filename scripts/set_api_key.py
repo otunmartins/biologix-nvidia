@@ -1,8 +1,10 @@
-"""Local form for putting NVIDIA credentials into ``.env``.
+"""Local form for putting credentials into ``.env``.
 
-Purpose: get ``NVIDIA_API_KEY`` (and optionally ``NGC_API_KEY``) into the
-git-ignored ``.env`` without the key ever passing through a chat window, a
-shell history file, a command line or a web page.
+Purpose: get ``NVIDIA_API_KEY``, and optionally ``NGC_API_KEY`` and the Google
+OAuth pair, into the git-ignored ``.env`` without any of them ever passing
+through a chat window, a shell history file, a command line or a web page.
+The database connection string has its own form, ``set_database_url.py``,
+because it needs different checks and its own connection test.
 
 What it does and does not do:
 
@@ -38,7 +40,19 @@ ENV_EXAMPLE = ROOT / ".env.example"
 FIELDS: tuple[tuple[str, str], ...] = (
     ("NVIDIA_API_KEY", "NVIDIA API key  (build.nvidia.com, used for hosted NIM calls)"),
     ("NGC_API_KEY", "NGC API key  (optional, only to pull NIM containers from nvcr.io)"),
+    (
+        "GOOGLE_CLIENT_ID",
+        "Google OAuth client ID  (optional; console.cloud.google.com -> Credentials)",
+    ),
+    (
+        "GOOGLE_CLIENT_SECRET",
+        "Google OAuth client secret  (optional; both are needed for the sign-in button)",
+    ),
 )
+
+#: Fields whose absence is normal rather than a problem, so the form says
+#: "optional" instead of implying something is missing.
+OPTIONAL = frozenset({"NGC_API_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"})
 
 # The adapter the "test" action calls. DiffDock, because its hosted endpoint
 # answers on the configured path, so a failure there points at the key.
@@ -76,9 +90,19 @@ def describe(value: str | None) -> str:
 def validate(name: str, value: str) -> str | None:
     """Return why ``value`` cannot be stored, or None if it can."""
     if _UNSAFE.search(value):
-        return f"{name} contains a space, quote or '#'. Paste the key on its own."
+        return f"{name} contains a space, quote or '#'. Paste the value on its own."
     if len(value) < 20:
-        return f"{name} is only {len(value)} characters; that is too short to be a real key."
+        return f"{name} is only {len(value)} characters; that is too short to be a real value."
+    # The two Google fields are easy to paste into each other's box, and the
+    # resulting failure is a redirect loop rather than an error, so check the
+    # shapes Google actually issues.
+    if name == "GOOGLE_CLIENT_ID" and not value.endswith(".apps.googleusercontent.com"):
+        return (
+            "a Google client ID ends in '.apps.googleusercontent.com'. "
+            "This looks like the secret — check which box it went in."
+        )
+    if name == "GOOGLE_CLIENT_SECRET" and value.endswith(".apps.googleusercontent.com"):
+        return "that is the client ID, not the secret. The secret is the shorter value."
     return None
 
 
@@ -159,7 +183,7 @@ def run_form() -> int:
     from tkinter import messagebox, ttk
 
     root = tk.Tk()
-    root.title("Biologix-NVIDIA credentials")
+    root.title("Biologix credentials")
     root.resizable(False, False)
     frame = ttk.Frame(root, padding=16)
     frame.grid()
@@ -182,7 +206,8 @@ def run_form() -> int:
     def refresh_current() -> None:
         stored = read_current()
         for name, var in current_labels.items():
-            var.set(f"In .env now: {describe(stored.get(name))}. Leave empty to keep it.")
+            suffix = " (optional)" if name in OPTIONAL else ""
+            var.set(f"In .env now: {describe(stored.get(name))}{suffix}. Leave empty to keep it.")
 
     reveal = tk.BooleanVar(value=False)
     clear_clipboard = tk.BooleanVar(value=True)
@@ -304,7 +329,9 @@ def run_cli() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Store NVIDIA credentials in .env")
+    parser = argparse.ArgumentParser(
+        description="Store NVIDIA and Google OAuth credentials in .env"
+    )
     parser.add_argument("--cli", action="store_true", help="hidden terminal prompts, no window")
     args = parser.parse_args()
 
