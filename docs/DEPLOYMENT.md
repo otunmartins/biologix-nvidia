@@ -53,42 +53,51 @@ There is no Postgres on those plans either. A GoDaddy VPS with root could run
 this via Docker, if you would rather keep one vendor — it means you own TLS
 renewal, the firewall, OS patching and uptime.
 
-## 1. Check the spec, then create the app
+## 1. One-time setup
 
-[`.do/app.yaml`](../.do/app.yaml) is the whole deployment, and its comments
-explain each decision. Two fields are worth confirming against DigitalOcean's
-current values before the first create, because they change over time:
+1. **Let App Platform see the repository.** In the DigitalOcean dashboard,
+   connect GitHub and grant the DigitalOcean app access to
+   `otunmartins/biologix-nvidia`. `deploy_on_push` needs this even though the
+   repository is public.
+2. **Install and sign in to doctl:**
+   ```bash
+   winget install DigitalOcean.Doctl
+   doctl auth init        # paste an API token at the prompt
+   ```
+3. **Make sure `.env` holds the four secrets** — `BIOLOGIX_DATABASE_URL`,
+   `NVIDIA_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — via the masked
+   forms `scripts/set_database_url.py` and `scripts/set_api_key.py`.
 
-- `region: lon` — closest region to you
-- `instance_size_slug:` — the paid instance sizes get renamed periodically
+## 2. Deploy — always through the script
 
 ```bash
-doctl apps spec validate --spec .do/app.yaml   # catches both
-doctl apps create --spec .do/app.yaml
+python scripts/do_deploy.py --validate   # checks the spec, deploys nothing
+python scripts/do_deploy.py              # creates the app, or updates it
 ```
 
-Later changes are `doctl apps update <app-id> --spec .do/app.yaml`.
+**Never run `doctl apps update --spec .do/app.yaml` directly.** `update`
+replaces the whole spec, and the committed spec deliberately contains no
+secrets — so it would silently delete the database URL and every key from the
+running app, and the next release would fail at the migration with nothing
+obviously wrong.
 
-## 2. Set the secrets
+The script sends the committed spec plus the four secrets as app-level
+`SECRET` variables, which DigitalOcean encrypts on receipt and which reach both
+the `api` service and the `migrate` job. The merged spec exists only in a
+temporary file for the length of the doctl call, and doctl's output is
+scrubbed of every secret value before it is shown, because `spec validate`
+echoes the spec back.
 
-**Not in the spec file, ever.** Set them in the dashboard under Settings →
-App-Level Environment Variables with type **Secret**, or pass them on the
-command line:
+To rotate a secret: update `.env` with the form, then run the script again.
 
-| Variable | Value |
-|---|---|
-| `BIOLOGIX_DATABASE_URL` | your Neon string, `postgresql+psycopg://…?sslmode=require` |
-| `NVIDIA_API_KEY` | from build.nvidia.com |
-| `GOOGLE_CLIENT_ID` | from the Google console |
-| `GOOGLE_CLIENT_SECRET` | from the Google console |
+Two spec fields drift as DigitalOcean renames things — `region` and
+`instance_size_slug` — and `--validate` is what catches them.
 
-Everything non-secret is already in the spec: `BIOLOGIX_ENV=production`,
+Non-secret settings are already in the spec: `BIOLOGIX_ENV=production`,
 `BIOLOGIX_API_URL=http://api:8080`, the Google redirect URI and the allowed
-domain.
-
-`BIOLOGIX_ENV=production` forces the session cookie to `Secure` and refuses an
-explicit attempt to turn that off, so you never set
-`BIOLOGIX_SESSION_COOKIE_SECURE` yourself.
+domain. `BIOLOGIX_ENV=production` forces the session cookie to `Secure` and
+refuses a SQLite database outright, so a missing database URL fails the
+release instead of booting on a throwaway file.
 
 ## 3. The migration runs itself
 

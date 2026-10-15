@@ -15,16 +15,17 @@
 # attack surface serving no purpose. There is no api.algonix.co.uk to find,
 # and no CORS entry to get wrong.
 #
-# Apply with:
-#     doctl apps create --spec .do/app.yaml
-#     doctl apps update <app-id> --spec .do/app.yaml
+# Deploy with the script, never with doctl directly:
+#     python scripts/do_deploy.py --validate
+#     python scripts/do_deploy.py
 #
-# SECRETS ARE NOT IN THIS FILE and must never be. Set them once in the
-# dashboard (Settings -> App-Level Environment Variables, type Secret) or:
-#     doctl apps update <app-id> --spec .do/app.yaml \
-#       --env "BIOLOGIX_DATABASE_URL=..." ...
-# Required secrets: BIOLOGIX_DATABASE_URL, NVIDIA_API_KEY,
-#                   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+# `doctl apps update --spec .do/app.yaml` REPLACES the app's spec, and this
+# file holds no secrets, so running it directly would delete the database URL
+# and every key from the live app. The script merges the four secrets from
+# .env in memory — BIOLOGIX_DATABASE_URL, NVIDIA_API_KEY, GOOGLE_CLIENT_ID,
+# GOOGLE_CLIENT_SECRET — as app-level SECRET variables, then applies it.
+#
+# SECRETS ARE NOT IN THIS FILE and must never be.
 name: biologix
 region: lon
 
