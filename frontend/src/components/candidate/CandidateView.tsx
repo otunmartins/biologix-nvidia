@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { AnalysisPanel } from "@/components/candidate/AnalysisPanel";
 import { ChainSchematic } from "@/components/candidate/ChainSchematic";
+import { MoleculeViewer } from "@/components/candidate/MoleculeViewer";
+import { SynthesisPanel } from "@/components/candidate/SynthesisPanel";
 import { DecisionControl } from "@/components/campaign/DecisionControl";
 import { Chip, EvidenceTag, Panel, Stat } from "@/components/ui/Primitives";
 import { VerdictBadge } from "@/components/ui/Status";
@@ -33,6 +35,7 @@ export function CandidateView({
 
   const descriptors = candidate.descriptors;
   const constraints = candidate.constraints ?? [];
+  const structure = candidate.structure;
 
   return (
     <div className="space-y-6">
@@ -80,6 +83,37 @@ export function CandidateView({
         endGroup={candidate.end_group}
         architecture={candidate.architecture}
       />
+
+      {/* The chain's own geometry, and how it would be made. Both are
+          available during triage, before any GPU job is spent on it. */}
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+        {structure?.available && structure.url ? (
+          <MoleculeViewer structure={structure} structureUrl={`/api/bx${structure.url}`} />
+        ) : (
+          structure?.reason && (
+            <div className="rounded-xl border border-hairline bg-surface px-4 py-3.5">
+              <h3 className="text-[13px] font-semibold uppercase tracking-[0.14em] text-ink-2">
+                No 3D conformer
+              </h3>
+              <p className="mt-1.5 text-2xs leading-relaxed text-muted">{structure.reason}</p>
+            </div>
+          )
+        )}
+
+        {candidate.synthesis ? (
+          <SynthesisPanel route={candidate.synthesis} />
+        ) : (
+          <div className="rounded-xl border border-hairline bg-surface px-4 py-3.5">
+            <h3 className="text-[13px] font-semibold uppercase tracking-[0.14em] text-ink-2">
+              No stored route
+            </h3>
+            <p className="mt-1.5 text-2xs leading-relaxed text-muted">
+              This candidate was stored without a synthesis route. Routes are recorded by the
+              generator, so a candidate from an earlier run may predate them.
+            </p>
+          </div>
+        )}
+      </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat

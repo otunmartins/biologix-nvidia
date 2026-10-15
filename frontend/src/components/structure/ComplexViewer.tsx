@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EvidenceTag } from "@/components/ui/Primitives";
+import { load3Dmol, type Viewer } from "@/lib/threedmol";
 import type { Job, StructureArtifact } from "@/lib/types";
 
 /**
@@ -19,54 +20,6 @@ import type { Job, StructureArtifact } from "@/lib/types";
  * one panel on one page, and 800 KB of WebGL has no business in the main
  * bundle.
  */
-
-const THREEDMOL_SRC = "https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js";
-
-type Viewer = {
-  addModel: (data: string, format: string) => unknown;
-  setStyle: (selection: object, style: object) => void;
-  addSurface: (type: unknown, style: object, selection?: object) => void;
-  removeAllSurfaces: () => void;
-  removeAllModels: () => void;
-  setBackgroundColor: (color: string, alpha?: number) => void;
-  zoomTo: (selection?: object) => void;
-  zoom: (factor: number) => void;
-  render: () => void;
-  spin: (axis: string | boolean, speed?: number) => void;
-  setViewStyle: (style: object) => void;
-  getModel: (index?: number) => { setFrame?: (n: number) => void } | undefined;
-  setFrame: (frame: number) => Promise<void> | void;
-  getNumFrames?: () => number;
-  resize: () => void;
-  clear: () => void;
-};
-
-declare global {
-  interface Window {
-    $3Dmol?: {
-      createViewer: (element: HTMLElement, config: object) => Viewer;
-      SurfaceType: { VDW: unknown; SAS: unknown };
-    };
-  }
-}
-
-let scriptPromise: Promise<void> | null = null;
-
-function load3Dmol(): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  if (window.$3Dmol) return Promise.resolve();
-  if (scriptPromise) return scriptPromise;
-  scriptPromise = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = THREEDMOL_SRC;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () =>
-      reject(new Error("the 3D viewer library could not be loaded from the CDN"));
-    document.head.appendChild(script);
-  });
-  return scriptPromise;
-}
 
 type Style = "cartoon" | "surface" | "ribbon";
 

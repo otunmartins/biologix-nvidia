@@ -363,6 +363,54 @@ export type CampaignDetail = RunDetail & {
   jobs: Job[];
 };
 
+/** Why a repeat unit was ranked where it was, from the generator's own scoring. */
+export type UnitSelection = {
+  fit_score: number;
+  logp_per_repeat: number | null;
+  aromatic_fraction: number | null;
+  reasons: string[];
+};
+
+/** The route stored with a candidate: the monomer, the reaction, the objections. */
+export type SynthesisRoute = {
+  mechanism: string;
+  monomer_smiles: string | null;
+  monomer_class: string | null;
+  confidence: string;
+  defensible: boolean;
+  reasoning: string;
+  retro_steps: string[];
+  reagents: string[];
+  precedent: string | null;
+  sa_score: number | null;
+  sa_note: string;
+  concerns: string[];
+  derivation: string;
+  selection?: UnitSelection;
+};
+
+/**
+ * The conformer the 3D panel renders, with everything needed to label it.
+ * `available: false` carries the reason, so a candidate that cannot be
+ * embedded says why instead of showing an empty viewer.
+ */
+export type CandidateStructure = {
+  available: boolean;
+  reason: string | null;
+  url?: string;
+  smiles?: string;
+  degree_of_polymerisation: number;
+  n_atoms: number;
+  n_heavy_atoms: number;
+  molecular_weight: number;
+  force_field: string;
+  converged: boolean;
+  energy_kcal_per_mol: number | null;
+  evidence: string;
+  caveat: string;
+  warnings: string[];
+};
+
 export type CandidateDetail = CandidateRow & {
   run: RunSummary | null;
   constraints: ConstraintSet["constraints"];
@@ -370,6 +418,8 @@ export type CandidateDetail = CandidateRow & {
   decisions: DecisionRecord[];
   my_decision: DecisionRecord | null;
   evidence: string;
+  structure?: CandidateStructure;
+  synthesis?: SynthesisRoute | null;
 };
 
 /* -- the target catalogue ------------------------------------------------- */

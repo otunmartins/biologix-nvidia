@@ -42,13 +42,26 @@ from biologix.screening.filters import (
 from biologix.screening.fingerprints import get_backend
 from biologix.settings import Settings, get_settings
 from biologix.store import fail_run, save_run_results, set_run_progress
+from biologix.targets.formulation import FormulationProfile
 
 GENERATORS = ("baseline", "genmol", "molmim")
 
 Progress = Callable[[str, float], None]
 
 
-def _generate(generator: str, n: int, seed: int) -> GenerationResult:
+def _generate(
+    generator: str,
+    n: int,
+    seed: int,
+    profile: FormulationProfile | None = None,
+) -> GenerationResult:
+    """Run one generator, giving it the target's profile where it can use it.
+
+    The profile is derived from the target's own sequence, so it is available
+    for any biologic a user imports and not only for a curated few. A
+    generator that cannot take it is called without it rather than silently
+    given something it would ignore.
+    """
     if generator == "baseline":
         from biologix.polymers.generate import BaselineGenerator
 
@@ -56,7 +69,7 @@ def _generate(generator: str, n: int, seed: int) -> GenerationResult:
     if generator == "genmol":
         from biologix.nvidia.genmol import GenMolGenerator
 
-        return GenMolGenerator().generate(n)
+        return GenMolGenerator().generate(n, profile=profile)
     if generator == "molmim":
         from biologix.nvidia.molmim import MolMIMGenerator
 
@@ -107,6 +120,7 @@ def execute_run(
     seed: int | None,
     settings: Settings | None = None,
     progress: Progress | None = None,
+    target_key: str | None = None,
 ) -> None:
     """Run one generate-and-screen pass and store everything it produced.
 
@@ -127,7 +141,20 @@ def execute_run(
             DEFAULT_CONSTRAINTS if constraint_set is None else get_constraint_set(constraint_set)
         )
         report("generating", 0.05)
-        result = _generate(generator, n, seed if seed is not None else s.seed)
+        # The target's formulation profile, from its sequence. A target that
+        # cannot be resolved is not fatal: the run proceeds target-blind and
+        # the manifest records that it did, which is better than failing a
+        # campaign over a profile that only biases the search.
+        profile = None
+        if target_key:
+            try:
+                from biologix.targets.formulation import profile_target
+                from biologix.targets.registry import get_target
+
+                profile = profile_target(get_target(target_key))
+            except (KeyError, ValueError):
+                profile = None
+        result = _generate(generator, n, seed if seed is not None else s.seed, profile)
 
         discards = [
             {
@@ -195,6 +222,13 @@ def execute_run(
         derivation = (result.manifest.outputs or {}).get("conversion")
         if isinstance(derivation, dict):
             statistics["derivation"] = derivation
+        # The funnel and the target profile: a cohort shorter than requested
+        # has to be explainable from the stored run alone.
+        selection = (result.manifest.outputs or {}).get("selection")
+        if isinstance(selection, dict):
+            statistics["selection"] = selection
+        if profile is not None:
+            statistics["target_profile"] = profile.to_dict()
 
         save_run_results(
             run_id,

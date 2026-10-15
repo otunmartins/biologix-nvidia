@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from biologix.api.deps import CurrentUser
 from biologix.jobs import GENERATORS, JOB_KINDS, MAX_CANDIDATES, MAX_POSES
 from biologix.jobs.artifacts import read_artifact
+from biologix.polymers.conformer import ConformerFailed, embed_repeat_unit_cached
 from biologix.ranking import BASIS_NOTE, CRITERIA, DEFAULT_WEIGHTS, rank_candidates
 from biologix.screening.filters import CONSTRAINT_SETS
 from biologix.settings import Settings
@@ -278,9 +279,29 @@ def build_router(settings: Settings) -> APIRouter:
         mine = [
             d for d in list_decisions(run_id=run_id, url=url) if d["candidate_id"] == candidate_id
         ]
+        # What the 3D panel will show, so the page can label the picture and
+        # size its own request. Embedding failures are reported here rather
+        # than left for the viewer to discover as a blank panel.
+        structure: dict[str, Any] = {"available": False, "reason": None}
+        units = candidate.get("repeat_units") or []
+        if units:
+            try:
+                conformer = embed_repeat_unit_cached(
+                    units[0], int(candidate.get("degree_of_polymerisation") or 25)
+                )
+                structure = {
+                    "available": True,
+                    "reason": None,
+                    "url": f"/runs/{run_id}/candidates/{candidate_id}/structure",
+                    **conformer.metadata(),
+                }
+            except ConformerFailed as exc:
+                structure = {"available": False, "reason": str(exc)}
+
         return {
             **candidate,
             "evidence": "computed",
+            "structure": structure,
             "jobs": list_jobs(run_id=run_id, candidate_id=candidate_id, limit=40, url=url),
             "decisions": mine,
             "my_decision": next((d for d in mine if d["user_id"] == user["id"]), None),
@@ -340,6 +361,52 @@ def build_router(settings: Settings) -> APIRouter:
                 "which is stored with the job rather than discarded."
             ),
         }
+
+    @router.get(
+        "/runs/{run_id}/candidates/{candidate_id}/structure",
+        summary="3D coordinates for this candidate's own oligomer",
+    )
+    def candidate_structure(
+        run_id: str,
+        candidate_id: str,
+        user: CurrentUser,
+        fmt: str = Query("pdb", pattern="^(pdb|sdf)$"),
+    ) -> Response:
+        """A conformer of the candidate itself, with no target and no GPU.
+
+        This is the structure a user can see during triage, before committing
+        a docking or simulation job. It is computed on demand from the stored
+        repeat unit, memoised, and labelled with the caveat that it is one
+        vacuum conformer rather than a formulation prediction.
+        """
+        candidate = get_run_candidate(run_id, candidate_id, url=url)
+        if candidate is None:
+            raise HTTPException(
+                status_code=404, detail=f"no candidate {candidate_id!r} in run {run_id!r}"
+            )
+        units = candidate.get("repeat_units") or []
+        if not units:
+            raise HTTPException(
+                status_code=404, detail="this candidate has no repeat unit to embed"
+            )
+        try:
+            conformer = embed_repeat_unit_cached(
+                units[0], int(candidate.get("degree_of_polymerisation") or 25)
+            )
+        except ConformerFailed as exc:
+            # A candidate that cannot be embedded is a real answer, not a
+            # server error: the reason is the useful part.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        content = conformer.pdb if fmt == "pdb" else conformer.sdf
+        return Response(
+            content=content,
+            media_type="chemical/x-pdb" if fmt == "pdb" else "chemical/x-mdl-sdfile",
+            headers={
+                "cache-control": "private, max-age=3600",
+                "x-biologix-evidence": "computed",
+            },
+        )
 
     @router.get(
         "/jobs/{job_id}/structures/{name}",

@@ -102,6 +102,7 @@ class JobQueue:
             constraint_set=constraint_set,
             seed=resolved_seed,
             settings=self.settings,
+            target_key=target_key,
         )
         return run_id
 
