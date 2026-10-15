@@ -128,12 +128,11 @@ def main() -> int:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             yaml.safe_dump(spec, fh, sort_keys=False)
 
-        code, out = run(
-            doctl, ["apps", "spec", "validate", "--spec", tmp, "--schema-only"], secrets
-        )
-        if code != 0:
-            # --schema-only is not in every doctl release; retry without it.
-            code, out = run(doctl, ["apps", "spec", "validate", "--spec", tmp], secrets)
+        # Full validation, not --schema-only: the point is to learn whether
+        # DigitalOcean accepts this region, these instance sizes and this
+        # repository, which the schema alone cannot say. The spec file is a
+        # positional argument here, unlike create and update.
+        code, out = run(doctl, ["apps", "spec", "validate", tmp], secrets)
         if code != 0:
             print("x spec rejected by DigitalOcean:\n" + out)
             return 1
