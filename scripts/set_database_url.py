@@ -20,7 +20,8 @@ What it does:
   password replaced, and failures are redacted the same way.
 
 Usage:
-    python scripts/set_database_url.py              # prompt, then offer to test
+    python scripts/set_database_url.py              # window with a paste field
+    python scripts/set_database_url.py --cli        # hidden terminal prompt
     python scripts/set_database_url.py --test-only  # test what is already saved
 """
 
@@ -189,6 +190,176 @@ def confirm(question: str) -> bool:
     return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
 
 
+def run_form() -> int:
+    """A window with one paste field.
+
+    Pasting into a masked terminal prompt is uncomfortable — nothing appears,
+    so there is no way to tell a failed paste from a successful one. Here the
+    field accepts Ctrl+V, the value can be revealed deliberately, and the
+    clipboard can be cleared on save so the credential does not linger there.
+    """
+    import threading
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("Biologix — Postgres connection string")
+    root.resizable(False, False)
+    frame = ttk.Frame(root, padding=16)
+    frame.grid()
+
+    ttk.Label(
+        frame,
+        text="Neon connection string",
+        font=("TkDefaultFont", 10, "bold"),
+    ).grid(row=0, column=0, columnspan=4, sticky="w")
+    ttk.Label(
+        frame,
+        text=(
+            "Paste it exactly as Neon gives it to you. The scheme and sslmode are\n"
+            "corrected for you, and the password is never displayed or logged."
+        ),
+        foreground="#555555",
+        justify="left",
+    ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 8))
+
+    entry = ttk.Entry(frame, show="•", width=84)
+    entry.grid(row=2, column=0, columnspan=4, sticky="we")
+    entry.focus_set()
+
+    current = tk.StringVar()
+    ttk.Label(frame, textvariable=current, foreground="#555555").grid(
+        row=3, column=0, columnspan=4, sticky="w", pady=(4, 10)
+    )
+
+    def refresh_current() -> None:
+        saved = read_saved()
+        current.set(
+            f"In .env now: {redact(saved) if saved else 'not set'}"
+            + ("" if saved else "  (the app falls back to local SQLite)")
+        )
+
+    refresh_current()
+
+    reveal = tk.BooleanVar(value=False)
+    clear_clipboard = tk.BooleanVar(value=True)
+
+    ttk.Checkbutton(
+        frame,
+        text="Show what I pasted",
+        variable=reveal,
+        command=lambda: entry.configure(show="" if reveal.get() else "•"),
+    ).grid(row=4, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(frame, text="Clear the clipboard after saving", variable=clear_clipboard).grid(
+        row=5, column=0, columnspan=3, sticky="w"
+    )
+
+    status = tk.StringVar(
+        value=f"Writes to {ENV_FILE} (git-ignored). The string is not sent anywhere but Neon."
+    )
+    ttk.Label(frame, textvariable=status, wraplength=620, justify="left").grid(
+        row=6, column=0, columnspan=4, sticky="w", pady=(12, 12)
+    )
+
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=7, column=0, columnspan=4, sticky="w")
+    busy = {"running": False}
+
+    def set_busy(running: bool) -> None:
+        busy["running"] = running
+        state = "disabled" if running else "normal"
+        for child in buttons.winfo_children():
+            child.configure(state=state)
+
+    def save_only() -> str | None:
+        """Validate and store what is in the field. Returns the saved URL."""
+        pasted = entry.get().strip()
+        if not pasted:
+            saved = read_saved()
+            if saved and saved.startswith(("postgresql", "postgres://")):
+                status.set("Field empty, so the saved string is kept.")
+                return saved
+            status.set("Nothing pasted, and nothing usable saved. Paste the string first.")
+            return None
+        try:
+            url, fixes, warnings = inspect(pasted)
+        except ValueError as exc:
+            status.set(f"Refused: {exc}")
+            return None
+        try:
+            write_keys({VARIABLE: f'"{url}"'})
+        except OSError as exc:
+            status.set(f"Could not write .env: {exc}")
+            return None
+
+        entry.delete(0, tk.END)
+        if clear_clipboard.get():
+            root.clipboard_clear()
+        refresh_current()
+        lines = [f"Saved: {redact(url)}"]
+        lines += [f"  fixed: {f}" for f in fixes]
+        lines += [f"  note: {w}" for w in warnings]
+        if os.environ.get(VARIABLE):
+            lines.append(
+                f"  warning: {VARIABLE} is also set in your shell, and that copy "
+                "wins over .env until you unset it."
+            )
+        status.set("\n".join(lines))
+        return url
+
+    def in_background(work: object, url: str) -> None:
+        """Run a slow step off the Tk thread, reporting back through after()."""
+
+        def runner() -> None:
+            ok, report = work(url)  # type: ignore[operator]
+            root.after(0, lambda: finish(ok, report))
+
+        def finish(ok: bool, report: str) -> None:
+            status.set(("OK — " if ok else "Failed — ") + report)
+            set_busy(False)
+
+        set_busy(True)
+        threading.Thread(target=runner, daemon=True).start()
+
+    def on_save() -> None:
+        save_only()
+
+    def on_test() -> None:
+        url = save_only() or read_saved()
+        if not url:
+            return
+        status.set("Connecting to Postgres…")
+        in_background(test_connection, url)
+
+    def on_migrate() -> None:
+        url = save_only() or read_saved()
+        if not url:
+            return
+
+        def work(target: str) -> tuple[bool, str]:
+            ok, report = test_connection(target)
+            if not ok:
+                return False, report
+            ok, migration = run_migrations(target)
+            tail = "\n".join(migration.splitlines()[-6:])
+            return ok, ("schema is up to date\n" + tail if ok else migration)
+
+        status.set("Connecting, then running alembic upgrade head…")
+        in_background(work, url)
+
+    ttk.Button(buttons, text="Save", command=on_save).grid(row=0, column=0, padx=(0, 8))
+    ttk.Button(buttons, text="Save & test", command=on_test).grid(row=0, column=1, padx=(0, 8))
+    ttk.Button(buttons, text="Save, test & migrate", command=on_migrate).grid(
+        row=0, column=2, padx=(0, 8)
+    )
+    ttk.Button(buttons, text="Close", command=root.destroy).grid(row=0, column=3)
+
+    # Enter saves and tests, which is what someone who just pasted expects.
+    root.bind("<Return>", lambda _e: None if busy["running"] else on_test())
+    root.mainloop()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -197,7 +368,16 @@ def main() -> int:
     parser.add_argument(
         "--migrate", action="store_true", help="run alembic upgrade head without asking"
     )
+    parser.add_argument(
+        "--cli", action="store_true", help="hidden terminal prompt instead of the window"
+    )
     args = parser.parse_args()
+
+    if not args.cli and not args.test_only:
+        try:
+            return run_form()
+        except Exception as exc:  # noqa: BLE001 - headless or no tkinter
+            print(f"(falling back to the terminal prompt: {exc})\n")
 
     if os.environ.get(VARIABLE):
         print(
